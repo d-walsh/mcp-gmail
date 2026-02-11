@@ -19,9 +19,10 @@ DEFAULT_CREDENTIALS_PATH = "credentials.json"
 DEFAULT_TOKEN_PATH = "token.json"
 DEFAULT_USER_ID = "me"
 
-# Gmail API scopes
+# Gmail API scopes (modify required for add/remove labels on messages)
 GMAIL_SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.modify",
     "https://www.googleapis.com/auth/gmail.send",
     "https://www.googleapis.com/auth/gmail.compose",
     "https://www.googleapis.com/auth/gmail.labels",
@@ -169,6 +170,122 @@ def create_multipart_message(
     return {"raw": encoded_message}
 
 
+def _parse_email_addresses(header_value: str) -> List[str]:
+    """Parse a comma-separated email header into individual addresses."""
+    if not header_value:
+        return []
+    return [addr.strip() for addr in header_value.split(",") if addr.strip()]
+
+
+def _extract_email(address: str) -> str:
+    """Extract bare email from 'Name <email>' format."""
+    if "<" in address and ">" in address:
+        return address[address.index("<") + 1 : address.index(">")].lower()
+    return address.strip().lower()
+
+
+def create_reply_message(
+    service: GmailService,
+    message_id: str,
+    sender: str,
+    body: str,
+    user_id: str = DEFAULT_USER_ID,
+    reply_all: bool = True,
+    to: Optional[str] = None,
+    cc: Optional[str] = None,
+    bcc: Optional[str] = None,
+    html_body: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Create a reply message for an existing email.
+
+    Fetches the original message to get Message-ID, Subject, and threadId,
+    then constructs a MIME message with proper In-Reply-To and References
+    headers to keep the reply in the same Gmail thread.
+
+    When reply_all=True (default), automatically includes all original To and
+    CC recipients (excluding the sender's own email) in the CC field.
+
+    If html_body is provided, creates a multipart/alternative message with
+    both plain text and HTML parts.
+
+    Args:
+        service: Gmail API service instance
+        message_id: The Gmail message ID to reply to
+        sender: Email sender
+        body: Reply body text (plain text)
+        user_id: Gmail user ID (default: 'me')
+        reply_all: If True, include all original recipients in CC (default: True)
+        to: Override recipient (default: reply to original sender)
+        cc: Additional CC recipients to merge with reply-all recipients (optional)
+        bcc: Blind carbon copy recipients (optional)
+        html_body: HTML version of the reply body (optional, creates multipart email)
+
+    Returns:
+        A dictionary containing a base64url encoded email object and threadId
+    """
+    original = get_message(service, message_id, user_id=user_id)
+    headers = get_headers_dict(original)
+    thread_id = original.get("threadId")
+
+    original_message_id = headers.get("Message-ID", "")
+
+    original_subject = headers.get("Subject", "")
+    subject = original_subject if original_subject.startswith("Re:") else f"Re: {original_subject}"
+
+    if to is None:
+        to = headers.get("Reply-To", headers.get("From", ""))
+
+    # Build CC list for reply-all
+    if reply_all:
+        sender_email = _extract_email(sender)
+        to_email = _extract_email(to)
+
+        # Collect all original To + CC recipients
+        original_to = _parse_email_addresses(headers.get("To", ""))
+        original_cc = _parse_email_addresses(headers.get("Cc", ""))
+        all_recipients = original_to + original_cc
+
+        # Filter out sender and the To recipient to avoid duplicates
+        reply_all_cc = [
+            addr for addr in all_recipients
+            if _extract_email(addr) not in (sender_email, to_email)
+        ]
+
+        # Merge with any explicitly provided CC
+        if cc:
+            explicit_cc = _parse_email_addresses(cc)
+            explicit_emails = {_extract_email(a) for a in explicit_cc}
+            # Add reply-all addresses that aren't already in explicit CC
+            for addr in reply_all_cc:
+                if _extract_email(addr) not in explicit_emails:
+                    explicit_cc.append(addr)
+            cc = ", ".join(explicit_cc)
+        elif reply_all_cc:
+            cc = ", ".join(reply_all_cc)
+
+    # Build MIME message — multipart if html_body provided, plain text otherwise
+    if html_body:
+        message = MIMEMultipart("alternative")
+        message.attach(MIMEText(body, "plain"))
+        message.attach(MIMEText(html_body, "html"))
+    else:
+        message = MIMEText(body)
+    message["to"] = to
+    message["from"] = sender
+    message["subject"] = subject
+    if cc:
+        message["cc"] = cc
+    if bcc:
+        message["bcc"] = bcc
+    if original_message_id:
+        message["In-Reply-To"] = original_message_id
+        message["References"] = original_message_id
+
+    encoded = base64.urlsafe_b64encode(message.as_bytes()).decode()
+    return {"raw": encoded, "threadId": thread_id}
+
+
 def parse_message_body(message: Dict[str, Any]) -> str:
     """
     Parse the body of a Gmail message.
@@ -207,13 +324,16 @@ def get_headers_dict(message: Dict[str, Any]) -> Dict[str, str]:
     Extract headers from a Gmail message into a dictionary.
 
     Args:
-        message: The Gmail message object
+        message: The Gmail message object (payload may be absent in minimal API responses)
 
     Returns:
         Dictionary of message headers
     """
     headers = {}
-    for header in message["payload"]["headers"]:
+    payload = message.get("payload") if message else None
+    if not payload or "headers" not in payload:
+        return headers
+    for header in payload["headers"]:
         headers[header["name"]] = header["value"]
     return headers
 
@@ -245,6 +365,40 @@ def send_email(
         Sent message object
     """
     message = create_message(sender, to, subject, body, cc, bcc)
+    return service.users().messages().send(userId=user_id, body=message).execute()
+
+
+def send_reply(
+    service: GmailService,
+    message_id: str,
+    sender: str,
+    body: str,
+    user_id: str = DEFAULT_USER_ID,
+    reply_all: bool = True,
+    to: Optional[str] = None,
+    cc: Optional[str] = None,
+    bcc: Optional[str] = None,
+    html_body: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Send a reply to an existing email, keeping it in the same thread.
+
+    Args:
+        service: Gmail API service instance
+        message_id: The Gmail message ID to reply to
+        sender: Email sender
+        body: Reply body text
+        user_id: Gmail user ID (default: 'me')
+        reply_all: If True, include all original recipients (default: True)
+        to: Override recipient (default: reply to original sender)
+        cc: Carbon copy recipients (optional)
+        bcc: Blind carbon copy recipients (optional)
+        html_body: HTML version of the reply body (optional)
+
+    Returns:
+        Sent message object
+    """
+    message = create_reply_message(service, message_id, sender, body, user_id, reply_all, to, cc, bcc, html_body)
     return service.users().messages().send(userId=user_id, body=message).execute()
 
 
@@ -433,6 +587,41 @@ def create_draft(
         Draft object
     """
     message = create_message(sender, to, subject, body, cc, bcc)
+    draft_body = {"message": message}
+    return service.users().drafts().create(userId=user_id, body=draft_body).execute()
+
+
+def create_reply_draft(
+    service: GmailService,
+    message_id: str,
+    sender: str,
+    body: str,
+    user_id: str = DEFAULT_USER_ID,
+    reply_all: bool = True,
+    to: Optional[str] = None,
+    cc: Optional[str] = None,
+    bcc: Optional[str] = None,
+    html_body: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Create a draft reply to an existing email, keeping it in the same thread.
+
+    Args:
+        service: Gmail API service instance
+        message_id: The Gmail message ID to reply to
+        sender: Email sender
+        body: Reply body text
+        user_id: Gmail user ID (default: 'me')
+        reply_all: If True, include all original recipients (default: True)
+        to: Override recipient (default: reply to original sender)
+        cc: Carbon copy recipients (optional)
+        bcc: Blind carbon copy recipients (optional)
+        html_body: HTML version of the reply body (optional)
+
+    Returns:
+        Draft object
+    """
+    message = create_reply_message(service, message_id, sender, body, user_id, reply_all, to, cc, bcc, html_body)
     draft_body = {"message": message}
     return service.users().drafts().create(userId=user_id, body=draft_body).execute()
 

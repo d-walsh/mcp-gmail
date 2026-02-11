@@ -14,6 +14,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp_gmail.config import settings
 from mcp_gmail.gmail import (
     create_draft,
+    create_reply_draft,
     get_gmail_service,
     get_headers_dict,
     get_labels,
@@ -23,13 +24,24 @@ from mcp_gmail.gmail import (
     modify_message_labels,
     parse_message_body,
     search_messages,
+    send_reply,
 )
 from mcp_gmail.gmail import send_email as gmail_send_email
 
-# Initialize the Gmail service
-service = get_gmail_service(
-    credentials_path=settings.credentials_path, token_path=settings.token_path, scopes=settings.scopes
-)
+# Lazy-initialize Gmail service so MCP handshake completes before any auth/network calls
+_service = None
+
+
+def get_service():
+    global _service
+    if _service is None:
+        _service = get_gmail_service(
+            credentials_path=settings.credentials_path,
+            token_path=settings.token_path,
+            scopes=settings.scopes,
+        )
+    return _service
+
 
 mcp = FastMCP(
     "Gmail MCP Server",
@@ -98,7 +110,7 @@ def get_email_message(message_id: str) -> str:
     Returns:
         The formatted email content
     """
-    message = get_message(service, message_id, user_id=settings.user_id)
+    message = get_message(get_service(), message_id, user_id=settings.user_id)
     formatted_message = format_message(message)
     return formatted_message
 
@@ -114,7 +126,7 @@ def get_email_thread(thread_id: str) -> str:
     Returns:
         The formatted thread content with all messages
     """
-    thread = get_thread(service, thread_id, user_id=settings.user_id)
+    thread = get_thread(get_service(), thread_id, user_id=settings.user_id)
     messages = thread.get("messages", [])
 
     result = f"Email Thread (ID: {thread_id})\n"
@@ -143,9 +155,9 @@ def compose_email(
     Returns:
         The ID of the created draft and its content
     """
-    sender = service.users().getProfile(userId=settings.user_id).execute().get("emailAddress")
+    sender = get_service().users().getProfile(userId=settings.user_id).execute().get("emailAddress")
     draft = create_draft(
-        service, sender=sender, to=to, subject=subject, body=body, user_id=settings.user_id, cc=cc, bcc=bcc
+        get_service(), sender=sender, to=to, subject=subject, body=body, user_id=settings.user_id, cc=cc, bcc=bcc
     )
 
     draft_id = draft.get("id")
@@ -176,9 +188,9 @@ def send_email(
     Returns:
         Content of the sent email
     """
-    sender = service.users().getProfile(userId=settings.user_id).execute().get("emailAddress")
+    sender = get_service().users().getProfile(userId=settings.user_id).execute().get("emailAddress")
     message = gmail_send_email(
-        service, sender=sender, to=to, subject=subject, body=body, user_id=settings.user_id, cc=cc, bcc=bcc
+        get_service(), sender=sender, to=to, subject=subject, body=body, user_id=settings.user_id, cc=cc, bcc=bcc
     )
 
     message_id = message.get("id")
@@ -188,6 +200,92 @@ To: {to}
 Subject: {subject}
 CC: {cc or ""}
 BCC: {bcc or ""}
+Body: {body[:EMAIL_PREVIEW_LENGTH]}{"..." if len(body) > EMAIL_PREVIEW_LENGTH else ""}
+"""
+
+
+@mcp.tool()
+def reply_to_email(
+    message_id: str,
+    body: str,
+    reply_all: bool = True,
+    to: Optional[str] = None,
+    cc: Optional[str] = None,
+    bcc: Optional[str] = None,
+    html_body: Optional[str] = None,
+    send: bool = False,
+) -> str:
+    """
+    Reply to an existing email, keeping the reply in the same thread.
+
+    By default creates a draft with reply-all (includes all original recipients).
+    Set reply_all=False to reply only to the sender.
+    Set send=True to send immediately.
+    Provide html_body for rich formatting (tables, bold, etc.).
+
+    Args:
+        message_id: The Gmail message ID to reply to
+        body: Reply body content (plain text)
+        reply_all: If True, include all original To/CC recipients (default: True)
+        to: Override recipient (default: reply to sender)
+        cc: Additional CC recipients to merge with reply-all recipients (optional)
+        bcc: Blind carbon copy recipients (optional)
+        html_body: HTML version of the body for rich formatting (optional)
+        send: If True, send immediately; if False, create draft (default: False)
+
+    Returns:
+        Confirmation with draft/message ID and details
+    """
+    sender = get_service().users().getProfile(userId=settings.user_id).execute().get("emailAddress")
+
+    # Get original message details for display
+    original = get_message(get_service(), message_id, user_id=settings.user_id)
+    original_headers = get_headers_dict(original)
+    original_subject = original_headers.get("Subject", "No Subject")
+    reply_to = to or original_headers.get("Reply-To", original_headers.get("From", ""))
+
+    if send:
+        result = send_reply(
+            get_service(),
+            message_id=message_id,
+            sender=sender,
+            body=body,
+            user_id=settings.user_id,
+            reply_all=reply_all,
+            to=to,
+            cc=cc,
+            bcc=bcc,
+            html_body=html_body,
+        )
+        result_id = result.get("id")
+        return f"""
+Reply sent successfully with ID: {result_id}
+In reply to: {original_subject}
+To: {reply_to}
+CC: {cc or "(none)"}
+Reply-All: {reply_all}
+Body: {body[:EMAIL_PREVIEW_LENGTH]}{"..." if len(body) > EMAIL_PREVIEW_LENGTH else ""}
+"""
+    else:
+        result = create_reply_draft(
+            get_service(),
+            message_id=message_id,
+            sender=sender,
+            body=body,
+            user_id=settings.user_id,
+            reply_all=reply_all,
+            to=to,
+            cc=cc,
+            bcc=bcc,
+            html_body=html_body,
+        )
+        draft_id = result.get("id")
+        return f"""
+Reply draft created with ID: {draft_id}
+In reply to: {original_subject}
+To: {reply_to}
+CC: {cc or "(none)"}
+Reply-All: {reply_all}
 Body: {body[:EMAIL_PREVIEW_LENGTH]}{"..." if len(body) > EMAIL_PREVIEW_LENGTH else ""}
 """
 
@@ -230,7 +328,7 @@ def search_emails(
 
     # Use search_messages to find matching emails
     messages = search_messages(
-        service,
+        get_service(),
         user_id=settings.user_id,
         from_email=from_email,
         to_email=to_email,
@@ -247,7 +345,7 @@ def search_emails(
 
     for msg_info in messages:
         msg_id = msg_info.get("id")
-        message = get_message(service, msg_id, user_id=settings.user_id)
+        message = get_message(get_service(), msg_id, user_id=settings.user_id)
         headers = get_headers_dict(message)
 
         from_header = headers.get("From", "Unknown")
@@ -274,13 +372,13 @@ def query_emails(query: str, max_results: int = 10) -> str:
     Returns:
         Formatted list of matching emails
     """
-    messages = list_messages(service, user_id=settings.user_id, max_results=max_results, query=query)
+    messages = list_messages(get_service(), user_id=settings.user_id, max_results=max_results, query=query)
 
     result = f'Found {len(messages)} messages matching query: "{query}"\n'
 
     for msg_info in messages:
         msg_id = msg_info.get("id")
-        message = get_message(service, msg_id, user_id=settings.user_id)
+        message = get_message(get_service(), msg_id, user_id=settings.user_id)
         headers = get_headers_dict(message)
 
         from_header = headers.get("From", "Unknown")
@@ -303,7 +401,7 @@ def list_available_labels() -> str:
     Returns:
         Formatted list of labels with their IDs
     """
-    labels = get_labels(service, user_id=settings.user_id)
+    labels = get_labels(get_service(), user_id=settings.user_id)
 
     result = "Available Gmail Labels:\n"
     for label in labels:
@@ -331,7 +429,7 @@ def mark_message_read(message_id: str) -> str:
     """
     # Remove the UNREAD label
     result = modify_message_labels(
-        service, user_id=settings.user_id, message_id=message_id, remove_labels=["UNREAD"], add_labels=[]
+        get_service(), user_id=settings.user_id, message_id=message_id, remove_labels=["UNREAD"], add_labels=[]
     )
 
     # Get message details to show what was modified
@@ -359,16 +457,18 @@ def add_label_to_message(message_id: str, label_id: str) -> str:
     """
     # Add the specified label
     result = modify_message_labels(
-        service, user_id=settings.user_id, message_id=message_id, remove_labels=[], add_labels=[label_id]
+        get_service(), user_id=settings.user_id, message_id=message_id, remove_labels=[], add_labels=[label_id]
     )
 
-    # Get message details to show what was modified
-    headers = get_headers_dict(result)
-    subject = headers.get("Subject", "No Subject")
+    # Get message details to show what was modified (payload may be absent in minimal API response)
+    subject = "No Subject"
+    if result and "payload" in result:
+        headers = get_headers_dict(result)
+        subject = headers.get("Subject", "No Subject")
 
     # Get the label name for the confirmation message
     label_name = label_id
-    labels = get_labels(service, user_id=settings.user_id)
+    labels = get_labels(get_service(), user_id=settings.user_id)
     for label in labels:
         if label.get("id") == label_id:
             label_name = label.get("name", label_id)
@@ -396,7 +496,7 @@ def remove_label_from_message(message_id: str, label_id: str) -> str:
     """
     # Get the label name before we remove it
     label_name = label_id
-    labels = get_labels(service, user_id=settings.user_id)
+    labels = get_labels(get_service(), user_id=settings.user_id)
     for label in labels:
         if label.get("id") == label_id:
             label_name = label.get("name", label_id)
@@ -404,12 +504,14 @@ def remove_label_from_message(message_id: str, label_id: str) -> str:
 
     # Remove the specified label
     result = modify_message_labels(
-        service, user_id=settings.user_id, message_id=message_id, remove_labels=[label_id], add_labels=[]
+        get_service(), user_id=settings.user_id, message_id=message_id, remove_labels=[label_id], add_labels=[]
     )
 
-    # Get message details to show what was modified
-    headers = get_headers_dict(result)
-    subject = headers.get("Subject", "No Subject")
+    # Get message details to show what was modified (payload may be absent in minimal API response)
+    subject = "No Subject"
+    if result and "payload" in result:
+        headers = get_headers_dict(result)
+        subject = headers.get("Subject", "No Subject")
 
     return f"""
 Label removed from message:
@@ -439,7 +541,7 @@ def get_emails(message_ids: list[str]) -> str:
 
     for msg_id in message_ids:
         try:
-            message = get_message(service, msg_id, user_id=settings.user_id)
+            message = get_message(get_service(), msg_id, user_id=settings.user_id)
             retrieved_emails.append((msg_id, message))
         except Exception as e:
             error_emails.append((msg_id, str(e)))
@@ -460,3 +562,7 @@ def get_emails(message_ids: list[str]) -> str:
             result += f"Error: {error}\n"
 
     return result
+
+
+if __name__ == "__main__":
+    mcp.run(transport="stdio")
