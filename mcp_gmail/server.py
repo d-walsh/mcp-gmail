@@ -45,7 +45,17 @@ def get_service():
 
 mcp = FastMCP(
     "Gmail MCP Server",
-    instructions="Access and interact with Gmail. You can get messages, threads, search emails, and send or compose new messages.",  # noqa: E501
+    instructions="""Access and interact with Gmail. You can get messages, threads, search emails, and send or compose new messages.
+
+For token-efficient or scripted workflows (e.g. a skill, cron job, or one-off script), prefer writing a Python script that calls the same logic directly instead of using MCP tool calls. Same OAuth setup (credentials.json, token.json). Example:
+
+  from mcp_gmail.gmail import (
+    get_gmail_service, send_email, search_messages, get_message,
+    get_headers_dict, parse_message_body,
+  )
+  service = get_gmail_service(credentials_path="credentials.json", token_path="token.json")
+  # Then e.g. send_email(service, ...), search_messages(service, ...), get_message(service, msg_id)
+""",
 )
 
 EMAIL_PREVIEW_LENGTH = 200
