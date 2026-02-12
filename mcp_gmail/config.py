@@ -29,9 +29,6 @@ class Settings(BaseSettings):
     scopes: List[str] = GMAIL_SCOPES
     user_id: str = DEFAULT_USER_ID
     max_results: int = 10
-    # Multi-account: if True (default), all accounts share one token file (token_path) with keys per account.
-    # If False, each account uses a separate file with suffix (e.g. token_work.json for account "work").
-    multi_account_single_file: bool = True
 
     # Configure environment variable settings
     model_config = SettingsConfigDict(
@@ -61,18 +58,8 @@ def get_settings(config_file: Optional[str] = None) -> Settings:
 
 
 def get_token_path_for_account(account: Optional[str] = None) -> str:
-    """
-    Return token_path for the given account.
-    If multi_account_single_file is True, always return the same path (all accounts in one file).
-    Otherwise, return path with account suffix (e.g. token_work.json for account "work").
-    """
-    s = get_settings()
-    if s.multi_account_single_file:
-        return s.token_path
-    if not account:
-        return s.token_path
-    base, ext = os.path.splitext(s.token_path)
-    return f"{base}_{account}{ext}"
+    """Return token_path. All accounts use the same file; account selects the key inside it."""
+    return get_settings().token_path
 
 
 # Create a default settings instance

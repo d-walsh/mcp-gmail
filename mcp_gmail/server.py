@@ -20,6 +20,7 @@ from mcp_gmail.gmail import (
     create_reply_draft,
     delete_label as gmail_delete_label,
     download_attachments,
+    get_account_keys,
     get_draft as gmail_get_draft,
     get_gmail_service,
     get_headers_dict,
@@ -33,34 +34,33 @@ from mcp_gmail.gmail import (
     parse_message_body,
     search_messages,
     send_draft as gmail_send_draft,
+    send_email as gmail_send_email,
     send_reply,
     trash_message as gmail_trash_message,
     untrash_message as gmail_untrash_message,
     update_label as gmail_update_label,
 )
-from mcp_gmail.gmail import send_email as gmail_send_email
 
 # Lazy-initialize Gmail service per account so MCP handshake completes before any auth/network calls
 _services: dict = {}
 
 
 def get_service(account: Optional[str] = None):
-    """Return Gmail service for default or given account (multi-account support)."""
+    """Return Gmail service for default or given account (one token file, keys per account)."""
     key = account or "__default__"
     if key not in _services:
-        token_path = get_token_path_for_account(account)
         _services[key] = get_gmail_service(
             credentials_path=settings.credentials_path,
-            token_path=token_path,
+            token_path=get_token_path_for_account(account),
             scopes=settings.scopes,
-            account=account if settings.multi_account_single_file else None,
+            account=account,
         )
     return _services[key]
 
 
 mcp = FastMCP(
     "Gmail MCP Server",
-    instructions="""Access and interact with Gmail. You can get messages, threads, search emails, send or compose messages (with optional attachments), reply to emails (with optional attachments via reply_to_email), manage drafts and labels, trash/untrash, and download attachments. Multi-account is supported via the optional 'account' parameter on tools (use token file suffix, e.g. token_work.json for account 'work').
+    instructions="""Access and interact with Gmail. You can get messages, threads, search emails, send or compose messages (with optional attachments), reply to emails (with optional attachments via reply_to_email), manage drafts and labels, trash/untrash, and download attachments. Use list_accounts to see configured account keys. Multi-account: optional 'account' parameter on tools; one token file with keys (e.g. "default", "work", or email). Use page_token with next_page_token from search/read responses to fetch more results.
 
 For token-efficient or scripted workflows (e.g. a skill, cron job, or one-off script), prefer writing a Python script that calls the same logic directly instead of using MCP tool calls. Same OAuth setup (credentials.json, token.json). Example:
 
@@ -196,7 +196,7 @@ def get_inbox_for_account(account: str) -> str:
     Get latest emails from the inbox for a specific account.
 
     Args:
-        account: Account identifier (token file suffix, e.g. work for token_work.json)
+        account: Account identifier (key in token file, e.g. "work" or an email address)
 
     Returns:
         Formatted list of recent inbox messages
@@ -418,6 +418,21 @@ Reply-All: {reply_all}
 Attachments: {len(attachment_paths or [])} file(s)
 Body: {body[:EMAIL_PREVIEW_LENGTH]}{"..." if len(body) > EMAIL_PREVIEW_LENGTH else ""}
 """
+
+
+@mcp.tool()
+def list_accounts() -> str:
+    """
+    List configured account keys from the token file (for use with the account parameter on other tools).
+    Returns the keys available in the single token file (e.g. "default", "work", or email addresses).
+    """
+    keys = get_account_keys(settings.token_path)
+    if not keys:
+        return (
+            "No accounts configured yet. Run the OAuth flow (e.g. use any tool with "
+            "default account) to create the token file."
+        )
+    return "Configured accounts (use as account parameter on tools): " + ", ".join(sorted(keys))
 
 
 @mcp.tool()
@@ -786,9 +801,7 @@ def list_drafts(max_results: int = 10, account: Optional[str] = None) -> str:
     Returns:
         Formatted list of draft IDs and message IDs
     """
-    drafts = gmail_list_drafts(
-        get_service(account), user_id=settings.user_id, max_results=max_results
-    )
+    drafts = gmail_list_drafts(get_service(account), user_id=settings.user_id, max_results=max_results)
     result = f"Found {len(drafts)} draft(s):\n"
     for d in drafts:
         result += f"  Draft ID: {d.get('id')}  Message ID: {d.get('message', {}).get('id', 'N/A')}\n"
@@ -972,7 +985,9 @@ def list_attachments(message_id: str, account: Optional[str] = None) -> str:
         return f"Message {message_id} has no attachments."
     result = f"Message {message_id} has {len(atts)} attachment(s):\n"
     for a in atts:
-        result += f"  - {a.get('filename')} (id: {a.get('attachment_id')}, size: {a.get('size', 0)} bytes)\n"
+        result += (
+            f"  - {a.get('filename')} (id: {a.get('attachment_id')}, size: {a.get('size', 0)} bytes)\n"
+        )
     return result
 
 
@@ -1035,12 +1050,12 @@ def search_emails_prompt() -> dict:
         "messages": [
             {
                 "role": "system",
-                "content": "You're helping the user search their emails. Use search_emails for criteria (from, to, subject, dates, label, unread, has_attachment) or query_emails for a raw Gmail query. Optionally set include_conversations=True to see thread context.",
+                "content": "You're helping the user search their emails. Use search_emails for criteria (from, to, subject, dates, label, unread, has_attachment) or query_emails for a raw Gmail query. Optionally set include_conversations=True to see thread context. To fetch more results, use the next_page_token from the previous response as the page_token parameter.",
             },
             {"role": "user", "content": "I want to search my emails."},
             {
                 "role": "assistant",
-                "content": "I can search by: sender (from_email), recipient (to_email), subject, date range (after_date/before_date YYYY/MM/DD), label, unread, or has attachment. Or give me a raw Gmail query (e.g. from:user@example.com is:unread). Which account (optional)?",
+                "content": "I can search by: sender (from_email), recipient (to_email), subject, date range (after_date/before_date YYYY/MM/DD), label, unread, or has attachment. Or give me a raw Gmail query (e.g. from:user@example.com is:unread). Use page_token with a previous next_page_token to load more. Which account (optional)?",
             },
         ],
     }
@@ -1054,12 +1069,12 @@ def read_latest_emails_prompt() -> dict:
         "messages": [
             {
                 "role": "system",
-                "content": "You're helping the user read their recent emails. Use read_latest_emails with max_results; set download_attachments_flag=True to save attachments to a directory.",
+                "content": "You're helping the user read their recent emails. Use read_latest_emails with max_results; set download_attachments_flag=True to save attachments to a directory. Responses may include next_page_token; use it with search_emails or query_emails (page_token) to fetch more.",
             },
             {"role": "user", "content": "I want to check my recent emails."},
             {
                 "role": "assistant",
-                "content": "I'll fetch your latest inbox messages. How many would you like (default 10)? Should I download any attachments to a folder (e.g. downloaded_attachments)? Which account (optional)?",
+                "content": "I'll fetch your latest inbox messages. How many would you like (default 10)? Should I download any attachments to a folder (e.g. downloaded_attachments)? Use next_page_token with search/query to load more. Which account (optional)?",
             },
         ],
     }

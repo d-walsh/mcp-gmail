@@ -11,7 +11,7 @@ A Model Context Protocol (MCP) server that provides Gmail access for LLMs, power
 - **Drafts:** List, get, and send drafts
 - **Trash:** Move messages to trash and restore
 - **Attachments:** List attachments, download to a directory (single message or full thread)
-- **Multi-account:** Optional account parameter on tools; use separate token files (e.g. `token_work.json`)
+- **Multi-account:** Optional `account` parameter on tools; one token file with keys per account (e.g. `"default"`, `"work"`, or email)
 - **Prompts:** Guided prompts for compose, search, read latest, and download attachments
 - OAuth 2.0 authentication with Google's Gmail API
 
@@ -276,27 +276,15 @@ You can also raise `max_results` (or set `MCP_GMAIL_MAX_RESULTS`) to get more re
 
 ### Multi-account
 
-Use a different Gmail account by passing the **`account`** parameter on tools (and optionally on resources via `gmail://inbox/{account}`).
-
-**Two modes:**
-
-1. **Single token file (default)**  
-   All accounts use the same token file (e.g. `token.json`). The file holds one object per account, e.g. `{"default": {...}, "work": {...}}` or `{"david@gmail.com": {...}, "work@company.com": {...}}`. The `account` parameter must match the key in the file. Run the OAuth flow once per account; tokens are stored under that key in the same file.
-
-2. **Multiple token files**  
-   Set `MCP_GMAIL_MULTI_ACCOUNT_SINGLE_FILE=false`. For `account="work"` the server uses a separate file, e.g. `token_work.json`. Run the OAuth flow once per account; each account gets its own file.
-
-**If you already have both accounts in one token file:**  
-Ensure the file is valid JSON with one top-level object whose keys are account identifiers and whose values are Google OAuth token objects (each with `refresh_token`, `token`, etc.). No env change needed (single-file is the default). Pass the same key as the `account` parameter on tools (omit `account` or use the key for your primary account as default).
+All accounts use **one token file** (e.g. `token.json`). The file holds one object per account, e.g. `{"default": {...}, "work": {...}}` or `{"david@gmail.com": {...}, "work@company.com": {...}}`. Use a different Gmail account by passing the **`account`** parameter on tools (and optionally on resources via `gmail://inbox/{account}`). The `account` value must match a key in the token file. Run the OAuth flow once per account; tokens are stored under that key. Omit `account` or use the key for your primary account (e.g. `"default"`) as default.
 
 ## Environment Variables
 
 You can configure the server using environment variables:
 
 - `MCP_GMAIL_CREDENTIALS_PATH`: Path to the OAuth credentials JSON file (default: "credentials.json")
-- `MCP_GMAIL_TOKEN_PATH`: Path to store the OAuth token (default: "token.json"). With multiple files, tokens are `{path_stem}_{account}{ext}` (e.g. `token_work.json`). With single-file mode, this one file holds all accounts.
+- `MCP_GMAIL_TOKEN_PATH`: Path to the OAuth token file (default: "token.json"). One file holds all accounts; keys are account identifiers (e.g. `"default"`, `"work"`, or an email).
 - `MCP_GMAIL_MAX_RESULTS`: Default maximum results for search/inbox queries (default: 10)
-- `MCP_GMAIL_MULTI_ACCOUNT_SINGLE_FILE`: If true (default), all accounts use the same token file (keys: `default`, `work`, or email). If false, each account uses a separate file with suffix (e.g. `token_work.json`).
 
 ## License
 

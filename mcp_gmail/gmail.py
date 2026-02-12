@@ -6,6 +6,7 @@ import base64
 import json
 import mimetypes
 import os
+import time
 from email import encoders
 from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
@@ -17,6 +18,7 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import Resource, build
+from googleapiclient.errors import HttpError
 
 # Default settings
 DEFAULT_CREDENTIALS_PATH = "credentials.json"
@@ -39,9 +41,43 @@ GMAIL_MODIFY_SCOPE = ["https://www.googleapis.com/auth/gmail.modify"]
 GmailService = Resource
 
 
+def _execute_with_retry(request, max_retries: int = 3):
+    """Execute a Gmail API request with retry on 429 (rate limit) and 5xx errors."""
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            return request.execute()
+        except HttpError as e:
+            last_error = e
+            status = getattr(e, "resp", None) and getattr(e.resp, "status", None) or 0
+            if status == 429 or (500 <= status < 600):
+                if attempt < max_retries - 1:
+                    time.sleep(2**attempt)
+                    continue
+            raise
+    if last_error:
+        raise last_error
+
+
 def _is_legacy_token_format(data: Dict[str, Any]) -> bool:
     """True if data is a single OAuth token (has refresh_token at top level)."""
     return isinstance(data, dict) and "refresh_token" in data
+
+
+def get_account_keys(token_path: str = DEFAULT_TOKEN_PATH) -> List[str]:
+    """
+    Return the list of account keys in the token file (for multi-account).
+    If the file is legacy format or missing, return ["default"].
+    """
+    if not os.path.exists(token_path):
+        return []
+    with open(token_path, "r") as f:
+        data = json.load(f)
+    if _is_legacy_token_format(data):
+        return ["default"]
+    if isinstance(data, dict):
+        return list(data.keys())
+    return []
 
 
 def _save_token_file(
@@ -52,7 +88,10 @@ def _save_token_file(
     existing_data: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Save token. If is_multi or we're adding a second account, write multi-account format."""
-    if is_multi or (existing_data is not None and _is_legacy_token_format(existing_data) and account_key != "default"):
+    legacy_with_other = (
+        existing_data is not None and _is_legacy_token_format(existing_data) and account_key != "default"
+    )
+    if is_multi or legacy_with_other:
         if os.path.exists(token_path):
             with open(token_path, "r") as f:
                 data = json.load(f)
@@ -107,6 +146,13 @@ def get_gmail_service(
             token_data = existing_data.get(account_key)
             if token_data:
                 creds = Credentials.from_authorized_user_info(token_data)
+            elif account is not None:
+                available = ", ".join(sorted(existing_data.keys()))
+                raise ValueError(
+                    f"Account {account!r} not found in token file. "
+                    f"Available: {available or 'none'}. "
+                    "Run OAuth for the default account first, or use one of the listed keys."
+                )
 
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
@@ -354,8 +400,7 @@ def create_reply_message(
 
         # Filter out sender and the To recipient to avoid duplicates
         reply_all_cc = [
-            addr for addr in all_recipients
-            if _extract_email(addr) not in (sender_email, to_email)
+            addr for addr in all_recipients if _extract_email(addr) not in (sender_email, to_email)
         ]
 
         # Merge with any explicitly provided CC
@@ -504,7 +549,7 @@ def send_email(
         )
     else:
         message = create_message(sender, to, subject, body, cc, bcc)
-    return service.users().messages().send(userId=user_id, body=message).execute()
+    return _execute_with_retry(service.users().messages().send(userId=user_id, body=message))
 
 
 def send_reply(
@@ -542,7 +587,7 @@ def send_reply(
     message = create_reply_message(
         service, message_id, sender, body, user_id, reply_all, to, cc, bcc, html_body, attachment_paths
     )
-    return service.users().messages().send(userId=user_id, body=message).execute()
+    return _execute_with_retry(service.users().messages().send(userId=user_id, body=message))
 
 
 def get_labels(service: GmailService, user_id: str = DEFAULT_USER_ID) -> List[Dict[str, Any]]:
@@ -556,7 +601,7 @@ def get_labels(service: GmailService, user_id: str = DEFAULT_USER_ID) -> List[Di
     Returns:
         List of label objects
     """
-    response = service.users().labels().list(userId=user_id).execute()
+    response = _execute_with_retry(service.users().labels().list(userId=user_id))
     return response.get("labels", [])
 
 
@@ -587,7 +632,7 @@ def list_messages(
     }
     if page_token:
         request_params["pageToken"] = page_token
-    response = service.users().messages().list(**request_params).execute()
+    response = _execute_with_retry(service.users().messages().list(**request_params))
     messages = response.get("messages", [])
     next_page_token = response.get("nextPageToken")
     return messages, next_page_token
@@ -678,9 +723,7 @@ def search_messages(
     query = " ".join(query_parts)
 
     # Use the existing list_messages function to perform the search
-    return list_messages(
-        service, user_id, max_results, query, page_token=page_token
-    )
+    return list_messages(service, user_id, max_results, query, page_token=page_token)
 
 
 def get_message(service: GmailService, message_id: str, user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]:
@@ -695,7 +738,7 @@ def get_message(service: GmailService, message_id: str, user_id: str = DEFAULT_U
     Returns:
         Message object
     """
-    message = service.users().messages().get(userId=user_id, id=message_id).execute()
+    message = _execute_with_retry(service.users().messages().get(userId=user_id, id=message_id))
     return message
 
 
@@ -711,7 +754,7 @@ def get_thread(service: GmailService, thread_id: str, user_id: str = DEFAULT_USE
     Returns:
         Thread object
     """
-    thread = service.users().threads().get(userId=user_id, id=thread_id).execute()
+    thread = _execute_with_retry(service.users().threads().get(userId=user_id, id=thread_id))
     return thread
 
 
@@ -840,7 +883,7 @@ def send_draft(service: GmailService, draft_id: str, user_id: str = DEFAULT_USER
         Sent message object
     """
     draft = {"id": draft_id}
-    return service.users().drafts().send(userId=user_id, body=draft).execute()
+    return _execute_with_retry(service.users().drafts().send(userId=user_id, body=draft))
 
 
 def create_label(
@@ -1005,12 +1048,14 @@ def _collect_attachment_parts(parts: List[Dict[str, Any]], acc: List[Dict[str, A
         attachment_id = body.get("attachmentId")
         filename = part.get("filename")
         if attachment_id or filename:
-            acc.append({
-                "filename": filename or "unnamed",
-                "attachment_id": attachment_id,
-                "mime_type": part.get("mimeType", "application/octet-stream"),
-                "size": body.get("size", 0),
-            })
+            acc.append(
+                {
+                    "filename": filename or "unnamed",
+                    "attachment_id": attachment_id,
+                    "mime_type": part.get("mimeType", "application/octet-stream"),
+                    "size": body.get("size", 0),
+                }
+            )
         if "parts" in part:
             _collect_attachment_parts(part["parts"], acc)
 
@@ -1029,19 +1074,21 @@ def list_attachments(
     Returns:
         List of dicts with filename, attachment_id, mime_type, size
     """
-    message = service.users().messages().get(
-        userId=user_id, id=message_id, format="full"
-    ).execute()
+    message = _execute_with_retry(
+        service.users().messages().get(userId=user_id, id=message_id, format="full")
+    )
     payload = message.get("payload") or {}
     parts = payload.get("parts") or []
     if not parts and payload.get("filename"):
         body = payload.get("body") or {}
-        return [{
-            "filename": payload.get("filename", "unnamed"),
-            "attachment_id": body.get("attachmentId"),
-            "mime_type": payload.get("mimeType", "application/octet-stream"),
-            "size": body.get("size", 0),
-        }]
+        return [
+            {
+                "filename": payload.get("filename", "unnamed"),
+                "attachment_id": body.get("attachmentId"),
+                "mime_type": payload.get("mimeType", "application/octet-stream"),
+                "size": body.get("size", 0),
+            }
+        ]
     result: List[Dict[str, Any]] = []
     _collect_attachment_parts(parts, result)
     return result

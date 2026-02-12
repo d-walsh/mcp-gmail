@@ -35,6 +35,7 @@ def cmd_search(args):
         credentials_path=settings.credentials_path,
         token_path=settings.token_path,
         scopes=settings.scopes,
+        account=args.account,
     )
     messages, next_token = list_messages(
         service,
@@ -46,7 +47,7 @@ def cmd_search(args):
     for msg_info in messages:
         msg = get_message(service, msg_info["id"], user_id=settings.user_id)
         headers = get_headers_dict(msg)
-        print(f"id:{msg_info['id']}\tfrom:{headers.get('From','')}\tsubject:{headers.get('Subject','')}")
+        print(f"id:{msg_info['id']}\tfrom:{headers.get('From', '')}\tsubject:{headers.get('Subject', '')}")
     if next_token and args.show_next_token:
         print(f"next_page_token: {next_token}", file=sys.stderr)
 
@@ -56,6 +57,7 @@ def cmd_send(args):
         credentials_path=settings.credentials_path,
         token_path=settings.token_path,
         scopes=settings.scopes,
+        account=args.account,
     )
     sender = _get_sender(service)
     body = args.body
@@ -80,6 +82,7 @@ def cmd_get(args):
         credentials_path=settings.credentials_path,
         token_path=settings.token_path,
         scopes=settings.scopes,
+        account=args.account,
     )
     msg = get_message(service, args.message_id, user_id=settings.user_id)
     headers = get_headers_dict(msg)
@@ -103,6 +106,7 @@ def main():
     p_search.add_argument("--max", "-n", type=int, default=10, help="Max results")
     p_search.add_argument("--page-token", help="Page token from previous response")
     p_search.add_argument("--show-next-token", action="store_true", help="Print next_page_token to stderr")
+    p_search.add_argument("--account", "-a", help="Account key from token file (default if omitted)")
     p_search.set_defaults(func=cmd_search)
 
     p_send = sub.add_parser("send", help="Send an email")
@@ -112,10 +116,12 @@ def main():
     p_send.add_argument("--body-file", help="Read body from file (overrides --body)")
     p_send.add_argument("--cc", help="CC recipients")
     p_send.add_argument("--bcc", help="BCC recipients")
+    p_send.add_argument("--account", "-a", help="Account key from token file (default account if omitted)")
     p_send.set_defaults(func=cmd_send)
 
     p_get = sub.add_parser("get", help="Get one message by ID")
     p_get.add_argument("message_id", help="Gmail message ID")
+    p_get.add_argument("--account", "-a", help="Account key from token file (default account if omitted)")
     p_get.set_defaults(func=cmd_get)
 
     args = parser.parse_args()

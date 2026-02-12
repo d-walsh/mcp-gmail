@@ -38,3 +38,5 @@ target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "B", "I"]
+# server.py: long docstrings/prompts (E501), single consolidated gmail import block (I001)
+per-file-ignores = { "mcp_gmail/server.py" = ["E501", "I001"] }

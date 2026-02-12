@@ -5,7 +5,7 @@ Tests for the configuration module.
 import json
 from unittest.mock import patch
 
-from mcp_gmail.config import Settings, get_settings
+from mcp_gmail.config import Settings, get_settings, get_token_path_for_account
 
 
 def test_settings_from_file(tmp_path):
@@ -57,3 +57,13 @@ def test_settings_direct_use():
     assert settings.credentials_path == "direct_creds.json"
     assert settings.token_path == "direct_token.json"
     assert settings.max_results == 30
+
+
+def test_get_token_path_for_account_always_returns_same_path():
+    """Token path is the same for all accounts (single token file)."""
+    with patch.dict("os.environ", {"MCP_GMAIL_TOKEN_PATH": "single_token.json"}, clear=True):
+        # get_token_path_for_account uses get_settings(); env sets token_path
+        path_default = get_token_path_for_account()
+        path_work = get_token_path_for_account("work")
+        path_email = get_token_path_for_account("user@example.com")
+    assert path_default == path_work == path_email == "single_token.json"
