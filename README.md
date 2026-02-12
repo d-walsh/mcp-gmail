@@ -4,8 +4,15 @@ A Model Context Protocol (MCP) server that provides Gmail access for LLMs, power
 
 ## Features
 
-- Expose Gmail messages as MCP resources
-- Provide tools for composing, sending, and managing emails
+- **Resources:** Messages, threads, and inbox (default and per-account)
+- **Compose & send:** Drafts and send with optional file attachments
+- **Search:** Criteria-based and raw Gmail query; optional conversation/thread context
+- **Labels:** List, add/remove on messages, batch modify, create/update/delete labels
+- **Drafts:** List, get, and send drafts
+- **Trash:** Move messages to trash and restore
+- **Attachments:** List attachments, download to a directory (single message or full thread)
+- **Multi-account:** Optional account parameter on tools; use separate token files (e.g. `token_work.json`)
+- **Prompts:** Guided prompts for compose, search, read latest, and download attachments
 - OAuth 2.0 authentication with Google's Gmail API
 
 ## Prerequisites
@@ -207,18 +214,50 @@ Once running, you can connect to the MCP server using any MCP client or via Clau
 
 - `gmail://messages/{message_id}` - Access email messages
 - `gmail://threads/{thread_id}` - Access email threads
+- `gmail://inbox` - Latest inbox messages (default account)
+- `gmail://inbox/{account}` - Latest inbox messages for a specific account
 
 ### Available Tools
 
-- `compose_email` - Create a new email draft
-- `send_email` - Send an email
-- `search_emails` - Search for emails with specific filters (from, to, subject, dates, etc.)
-- `query_emails` - Search for emails using raw Gmail query syntax
-- `get_emails` - Retrieve multiple email messages by their IDs
-- `list_available_labels` - Get all available Gmail labels
-- `mark_message_read` - Mark a message as read
+Tools accept an optional **`account`** parameter for multi-account use (token file is derived as `token_{account}.json` by default).
+
+**Compose & send**
+- `compose_email` - Create a new email draft (optional `attachment_paths`)
+- `send_email` - Send an email (optional `attachment_paths`)
+- `reply_to_email` - Reply to a message (draft or send; optional `html_body`, `attachment_paths`)
+
+**Search & read**
+- `search_emails` - Search with filters (from, to, subject, dates, label, unread, etc.); optional `include_conversations`
+- `query_emails` - Raw Gmail query syntax
+- `read_latest_emails` - Latest inbox messages; optional attachment download to a directory
+- `get_emails` - Get multiple messages by ID
+
+**Drafts**
+- `list_drafts` - List draft IDs
+- `get_draft` - Get draft content by ID
+- `send_draft` - Send an existing draft
+
+**Labels**
+- `list_available_labels` - List all labels and IDs
 - `add_label_to_message` - Add a label to a message
 - `remove_label_from_message` - Remove a label from a message
+- `batch_modify_labels` - Add/remove labels on multiple messages
+- `create_label` - Create a new label
+- `update_label` - Update label name or visibility
+- `delete_label` - Delete a label
+
+**State & attachments**
+- `mark_message_read` - Remove UNREAD label
+- `trash_message` - Move message to trash
+- `untrash_message` - Restore message from trash
+- `list_attachments` - List attachments for a message (filename, id, size)
+- `download_email_attachments` - Download attachments to a directory (optionally whole thread)
+
+**Prompts** (guided flows)
+- `compose_email_prompt` - Guide for composing/sending an email
+- `search_emails_prompt` - Guide for searching
+- `read_latest_emails_prompt` - Guide for reading recent emails
+- `download_attachments_prompt` - Guide for downloading attachments
 
 ### Pagination
 
@@ -235,13 +274,29 @@ Example flow for an agent:
 
 You can also raise `max_results` (or set `MCP_GMAIL_MAX_RESULTS`) to get more results per page (Gmail API allows up to 500).
 
+### Multi-account
+
+Use a different Gmail account by passing the **`account`** parameter on tools (and optionally on resources via `gmail://inbox/{account}`).
+
+**Two modes:**
+
+1. **Single token file (default)**  
+   All accounts use the same token file (e.g. `token.json`). The file holds one object per account, e.g. `{"default": {...}, "work": {...}}` or `{"david@gmail.com": {...}, "work@company.com": {...}}`. The `account` parameter must match the key in the file. Run the OAuth flow once per account; tokens are stored under that key in the same file.
+
+2. **Multiple token files**  
+   Set `MCP_GMAIL_MULTI_ACCOUNT_SINGLE_FILE=false`. For `account="work"` the server uses a separate file, e.g. `token_work.json`. Run the OAuth flow once per account; each account gets its own file.
+
+**If you already have both accounts in one token file:**  
+Ensure the file is valid JSON with one top-level object whose keys are account identifiers and whose values are Google OAuth token objects (each with `refresh_token`, `token`, etc.). No env change needed (single-file is the default). Pass the same key as the `account` parameter on tools (omit `account` or use the key for your primary account as default).
+
 ## Environment Variables
 
 You can configure the server using environment variables:
 
 - `MCP_GMAIL_CREDENTIALS_PATH`: Path to the OAuth credentials JSON file (default: "credentials.json")
-- `MCP_GMAIL_TOKEN_PATH`: Path to store the OAuth token (default: "token.json")
-- `MCP_GMAIL_MAX_RESULTS`: Default maximum results for search queries (default: 10)
+- `MCP_GMAIL_TOKEN_PATH`: Path to store the OAuth token (default: "token.json"). With multiple files, tokens are `{path_stem}_{account}{ext}` (e.g. `token_work.json`). With single-file mode, this one file holds all accounts.
+- `MCP_GMAIL_MAX_RESULTS`: Default maximum results for search/inbox queries (default: 10)
+- `MCP_GMAIL_MULTI_ACCOUNT_SINGLE_FILE`: If true (default), all accounts use the same token file (keys: `default`, `work`, or email). If false, each account uses a separate file with suffix (e.g. `token_work.json`).
 
 ## License
 

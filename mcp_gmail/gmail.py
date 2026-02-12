@@ -4,10 +4,14 @@ This module provides utilities for authenticating with and using the Gmail API.
 
 import base64
 import json
+import mimetypes
 import os
+from email import encoders
+from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from typing import Any, Dict, List, Optional, Tuple
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -35,51 +39,90 @@ GMAIL_MODIFY_SCOPE = ["https://www.googleapis.com/auth/gmail.modify"]
 GmailService = Resource
 
 
+def _is_legacy_token_format(data: Dict[str, Any]) -> bool:
+    """True if data is a single OAuth token (has refresh_token at top level)."""
+    return isinstance(data, dict) and "refresh_token" in data
+
+
+def _save_token_file(
+    token_path: str,
+    token_json: Dict[str, Any],
+    account_key: str,
+    is_multi: bool,
+    existing_data: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Save token. If is_multi or we're adding a second account, write multi-account format."""
+    if is_multi or (existing_data is not None and _is_legacy_token_format(existing_data) and account_key != "default"):
+        if os.path.exists(token_path):
+            with open(token_path, "r") as f:
+                data = json.load(f)
+            if _is_legacy_token_format(data):
+                data = {"default": data}
+        else:
+            data = {}
+        data[account_key] = token_json
+        with open(token_path, "w") as f:
+            json.dump(data, f, indent=2)
+    else:
+        with open(token_path, "w") as f:
+            json.dump(token_json, f, indent=2)
+
+
 def get_gmail_service(
     credentials_path: str = DEFAULT_CREDENTIALS_PATH,
     token_path: str = DEFAULT_TOKEN_PATH,
     scopes: List[str] = GMAIL_SCOPES,
+    account: Optional[str] = None,
 ) -> GmailService:
     """
     Authenticate with Gmail API and return the service object.
 
+    Supports a single token file with multiple accounts: set account to the
+    account key (e.g. "work") and use the same token_path for all accounts.
+    The file will hold {"default": {...}, "work": {...}}. For one account,
+    the file can be the legacy format (single token at root).
+
     Args:
         credentials_path: Path to the credentials JSON file
-        token_path: Path to save/load the token
+        token_path: Path to save/load the token (or multi-account token file)
         scopes: OAuth scopes to request
+        account: Account key for multi-account single file (e.g. "work"). Omit for default.
 
     Returns:
         Authenticated Gmail API service
     """
     creds = None
+    account_key = account or "default"
+    existing_data = None
+    is_multi_file = False
 
-    # Look for token file with stored credentials
     if os.path.exists(token_path):
         with open(token_path, "r") as token:
-            token_data = json.load(token)
-            creds = Credentials.from_authorized_user_info(token_data)
+            existing_data = json.load(token)
+        if _is_legacy_token_format(existing_data):
+            if account is None:
+                creds = Credentials.from_authorized_user_info(existing_data)
+        else:
+            is_multi_file = True
+            token_data = existing_data.get(account_key)
+            if token_data:
+                creds = Credentials.from_authorized_user_info(token_data)
 
-    # If credentials don't exist or are invalid, authenticate
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
-            # Check if credentials file exists
             if not os.path.exists(credentials_path):
                 raise FileNotFoundError(
                     f"Credentials file not found at {credentials_path}. "
                     "Please download your OAuth credentials from Google Cloud Console."
                 )
-
             flow = InstalledAppFlow.from_client_secrets_file(credentials_path, scopes)
             creds = flow.run_local_server(port=0)
 
-        # Save credentials for future runs
         token_json = json.loads(creds.to_json())
-        with open(token_path, "w") as token:
-            json.dump(token_json, token)
+        _save_token_file(token_path, token_json, account_key, is_multi_file, existing_data)
 
-    # Build the Gmail service
     return build("gmail", "v1", credentials=creds)
 
 
@@ -170,6 +213,66 @@ def create_multipart_message(
     return {"raw": encoded_message}
 
 
+def create_message_with_attachments(
+    sender: str,
+    to: str,
+    subject: str,
+    message_text: str,
+    attachment_paths: Optional[List[Union[str, Path]]] = None,
+    cc: Optional[str] = None,
+    bcc: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Create a message with optional file attachments for the Gmail API.
+
+    Args:
+        sender: Email sender
+        to: Email recipient
+        subject: Email subject
+        message_text: Email body text
+        attachment_paths: Optional list of file paths to attach
+        cc: Carbon copy recipients (optional)
+        bcc: Blind carbon copy recipients (optional)
+
+    Returns:
+        A dictionary containing a base64url encoded email object
+    """
+    message = MIMEMultipart("mixed")
+    message["to"] = to
+    message["from"] = sender
+    message["subject"] = subject
+
+    if cc:
+        message["cc"] = cc
+    if bcc:
+        message["bcc"] = bcc
+
+    message.attach(MIMEText(message_text, "plain"))
+
+    if attachment_paths:
+        for path in attachment_paths:
+            path = Path(path)
+            if not path.exists():
+                raise FileNotFoundError(f"Attachment not found: {path}")
+            content_type, _ = mimetypes.guess_type(str(path))
+            if content_type is None:
+                content_type = "application/octet-stream"
+            main_type, sub_type = content_type.split("/", 1)
+            with open(path, "rb") as fp:
+                part = MIMEBase(main_type, sub_type)
+                part.set_payload(fp.read())
+            encoders.encode_base64(part)
+            part.add_header(
+                "Content-Disposition",
+                "attachment",
+                filename=path.name,
+            )
+            message.attach(part)
+
+    encoded_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
+    return {"raw": encoded_message}
+
+
 def _parse_email_addresses(header_value: str) -> List[str]:
     """Parse a comma-separated email header into individual addresses."""
     if not header_value:
@@ -195,9 +298,10 @@ def create_reply_message(
     cc: Optional[str] = None,
     bcc: Optional[str] = None,
     html_body: Optional[str] = None,
+    attachment_paths: Optional[List[Union[str, Path]]] = None,
 ) -> Dict[str, Any]:
     """
-    Create a reply message for an existing email.
+    Create a reply message for an existing email, optionally with file attachments.
 
     Fetches the original message to get Message-ID, Subject, and threadId,
     then constructs a MIME message with proper In-Reply-To and References
@@ -207,7 +311,8 @@ def create_reply_message(
     CC recipients (excluding the sender's own email) in the CC field.
 
     If html_body is provided, creates a multipart/alternative message with
-    both plain text and HTML parts.
+    both plain text and HTML parts. If attachment_paths is provided, uses
+    multipart/mixed with body part(s) plus attachment parts.
 
     Args:
         service: Gmail API service instance
@@ -220,6 +325,7 @@ def create_reply_message(
         cc: Additional CC recipients to merge with reply-all recipients (optional)
         bcc: Blind carbon copy recipients (optional)
         html_body: HTML version of the reply body (optional, creates multipart email)
+        attachment_paths: Optional list of file paths to attach
 
     Returns:
         A dictionary containing a base64url encoded email object and threadId
@@ -264,13 +370,39 @@ def create_reply_message(
         elif reply_all_cc:
             cc = ", ".join(reply_all_cc)
 
-    # Build MIME message — multipart if html_body provided, plain text otherwise
+    # Body part: plain, or alternative (plain + html)
     if html_body:
-        message = MIMEMultipart("alternative")
-        message.attach(MIMEText(body, "plain"))
-        message.attach(MIMEText(html_body, "html"))
+        body_part = MIMEMultipart("alternative")
+        body_part.attach(MIMEText(body, "plain"))
+        body_part.attach(MIMEText(html_body, "html"))
     else:
-        message = MIMEText(body)
+        body_part = MIMEText(body)
+
+    # Root: use mixed when we have attachments so we can attach body + files
+    if attachment_paths:
+        message = MIMEMultipart("mixed")
+        message.attach(body_part)
+        for path in attachment_paths:
+            path = Path(path)
+            if not path.exists():
+                raise FileNotFoundError(f"Attachment not found: {path}")
+            content_type, _ = mimetypes.guess_type(str(path))
+            if content_type is None:
+                content_type = "application/octet-stream"
+            main_type, sub_type = content_type.split("/", 1)
+            with open(path, "rb") as fp:
+                part = MIMEBase(main_type, sub_type)
+                part.set_payload(fp.read())
+            encoders.encode_base64(part)
+            part.add_header(
+                "Content-Disposition",
+                "attachment",
+                filename=path.name,
+            )
+            message.attach(part)
+    else:
+        message = body_part
+
     message["to"] = to
     message["from"] = sender
     message["subject"] = subject
@@ -347,9 +479,10 @@ def send_email(
     user_id: str = DEFAULT_USER_ID,
     cc: Optional[str] = None,
     bcc: Optional[str] = None,
+    attachment_paths: Optional[List[Union[str, Path]]] = None,
 ) -> Dict[str, Any]:
     """
-    Compose and send an email.
+    Compose and send an email, optionally with file attachments.
 
     Args:
         service: Gmail API service instance
@@ -360,11 +493,17 @@ def send_email(
         user_id: Gmail user ID (default: 'me')
         cc: Carbon copy recipients (optional)
         bcc: Blind carbon copy recipients (optional)
+        attachment_paths: Optional list of file paths to attach
 
     Returns:
         Sent message object
     """
-    message = create_message(sender, to, subject, body, cc, bcc)
+    if attachment_paths:
+        message = create_message_with_attachments(
+            sender, to, subject, body, attachment_paths=attachment_paths, cc=cc, bcc=bcc
+        )
+    else:
+        message = create_message(sender, to, subject, body, cc, bcc)
     return service.users().messages().send(userId=user_id, body=message).execute()
 
 
@@ -379,9 +518,10 @@ def send_reply(
     cc: Optional[str] = None,
     bcc: Optional[str] = None,
     html_body: Optional[str] = None,
+    attachment_paths: Optional[List[Union[str, Path]]] = None,
 ) -> Dict[str, Any]:
     """
-    Send a reply to an existing email, keeping it in the same thread.
+    Send a reply to an existing email, keeping it in the same thread, optionally with attachments.
 
     Args:
         service: Gmail API service instance
@@ -394,11 +534,14 @@ def send_reply(
         cc: Carbon copy recipients (optional)
         bcc: Blind carbon copy recipients (optional)
         html_body: HTML version of the reply body (optional)
+        attachment_paths: Optional list of file paths to attach
 
     Returns:
         Sent message object
     """
-    message = create_reply_message(service, message_id, sender, body, user_id, reply_all, to, cc, bcc, html_body)
+    message = create_reply_message(
+        service, message_id, sender, body, user_id, reply_all, to, cc, bcc, html_body, attachment_paths
+    )
     return service.users().messages().send(userId=user_id, body=message).execute()
 
 
@@ -581,9 +724,10 @@ def create_draft(
     user_id: str = DEFAULT_USER_ID,
     cc: Optional[str] = None,
     bcc: Optional[str] = None,
+    attachment_paths: Optional[List[Union[str, Path]]] = None,
 ) -> Dict[str, Any]:
     """
-    Create a draft email.
+    Create a draft email, optionally with file attachments.
 
     Args:
         service: Gmail API service instance
@@ -594,11 +738,17 @@ def create_draft(
         user_id: Gmail user ID (default: 'me')
         cc: Carbon copy recipients (optional)
         bcc: Blind carbon copy recipients (optional)
+        attachment_paths: Optional list of file paths to attach
 
     Returns:
         Draft object
     """
-    message = create_message(sender, to, subject, body, cc, bcc)
+    if attachment_paths:
+        message = create_message_with_attachments(
+            sender, to, subject, body, attachment_paths=attachment_paths, cc=cc, bcc=bcc
+        )
+    else:
+        message = create_message(sender, to, subject, body, cc, bcc)
     draft_body = {"message": message}
     return service.users().drafts().create(userId=user_id, body=draft_body).execute()
 
@@ -614,9 +764,10 @@ def create_reply_draft(
     cc: Optional[str] = None,
     bcc: Optional[str] = None,
     html_body: Optional[str] = None,
+    attachment_paths: Optional[List[Union[str, Path]]] = None,
 ) -> Dict[str, Any]:
     """
-    Create a draft reply to an existing email, keeping it in the same thread.
+    Create a draft reply to an existing email, keeping it in the same thread, optionally with attachments.
 
     Args:
         service: Gmail API service instance
@@ -629,11 +780,14 @@ def create_reply_draft(
         cc: Carbon copy recipients (optional)
         bcc: Blind carbon copy recipients (optional)
         html_body: HTML version of the reply body (optional)
+        attachment_paths: Optional list of file paths to attach
 
     Returns:
         Draft object
     """
-    message = create_reply_message(service, message_id, sender, body, user_id, reply_all, to, cc, bcc, html_body)
+    message = create_reply_message(
+        service, message_id, sender, body, user_id, reply_all, to, cc, bcc, html_body, attachment_paths
+    )
     draft_body = {"message": message}
     return service.users().drafts().create(userId=user_id, body=draft_body).execute()
 
@@ -842,6 +996,132 @@ def untrash_message(
         Updated message object
     """
     return service.users().messages().untrash(userId=user_id, id=message_id).execute()
+
+
+def _collect_attachment_parts(parts: List[Dict[str, Any]], acc: List[Dict[str, Any]]) -> None:
+    """Recursively collect attachment part info (filename, attachment_id, mimeType, size)."""
+    for part in parts or []:
+        body = part.get("body") or {}
+        attachment_id = body.get("attachmentId")
+        filename = part.get("filename")
+        if attachment_id or filename:
+            acc.append({
+                "filename": filename or "unnamed",
+                "attachment_id": attachment_id,
+                "mime_type": part.get("mimeType", "application/octet-stream"),
+                "size": body.get("size", 0),
+            })
+        if "parts" in part:
+            _collect_attachment_parts(part["parts"], acc)
+
+
+def list_attachments(
+    service: GmailService, message_id: str, user_id: str = DEFAULT_USER_ID
+) -> List[Dict[str, Any]]:
+    """
+    List attachments for a message.
+
+    Args:
+        service: Gmail API service instance
+        message_id: Gmail message ID
+        user_id: Gmail user ID (default: 'me')
+
+    Returns:
+        List of dicts with filename, attachment_id, mime_type, size
+    """
+    message = service.users().messages().get(
+        userId=user_id, id=message_id, format="full"
+    ).execute()
+    payload = message.get("payload") or {}
+    parts = payload.get("parts") or []
+    if not parts and payload.get("filename"):
+        body = payload.get("body") or {}
+        return [{
+            "filename": payload.get("filename", "unnamed"),
+            "attachment_id": body.get("attachmentId"),
+            "mime_type": payload.get("mimeType", "application/octet-stream"),
+            "size": body.get("size", 0),
+        }]
+    result: List[Dict[str, Any]] = []
+    _collect_attachment_parts(parts, result)
+    return result
+
+
+def get_attachment(
+    service: GmailService,
+    user_id: str,
+    message_id: str,
+    attachment_id: str,
+) -> bytes:
+    """
+    Get attachment content as bytes.
+
+    Args:
+        service: Gmail API service instance
+        user_id: Gmail user ID
+        message_id: Gmail message ID
+        attachment_id: Gmail attachment ID
+
+    Returns:
+        Decoded attachment bytes
+    """
+    resp = (
+        service.users()
+        .messages()
+        .attachments()
+        .get(userId=user_id, messageId=message_id, id=attachment_id)
+        .execute()
+    )
+    data = resp.get("data")
+    if data:
+        return base64.urlsafe_b64decode(data)
+    return b""
+
+
+def download_attachments(
+    service: GmailService,
+    message_id: str,
+    target_dir: Union[str, Path],
+    user_id: str = DEFAULT_USER_ID,
+    download_all_in_thread: bool = False,
+) -> List[Path]:
+    """
+    Download all attachments from a message (or its thread) to a directory.
+
+    Args:
+        service: Gmail API service instance
+        message_id: Gmail message ID
+        target_dir: Directory to save files into
+        user_id: Gmail user ID (default: 'me')
+        download_all_in_thread: If True, download attachments from every message in the thread
+
+    Returns:
+        List of paths to saved files
+    """
+    target_dir = Path(target_dir)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    saved: List[Path] = []
+    message_ids_to_process: List[str] = [message_id]
+    if download_all_in_thread:
+        thread = get_thread(service, get_message(service, message_id, user_id)["threadId"], user_id)
+        message_ids_to_process = [m["id"] for m in thread.get("messages", [])]
+    for mid in message_ids_to_process:
+        for att in list_attachments(service, mid, user_id):
+            aid = att.get("attachment_id")
+            if not aid:
+                continue
+            data = get_attachment(service, user_id, mid, aid)
+            filename = att.get("filename") or "unnamed"
+            path = target_dir / filename
+            if path.exists():
+                base, ext = path.stem, path.suffix
+                n = 1
+                while path.exists():
+                    path = target_dir / f"{base}_{n}{ext}"
+                    n += 1
+            path.write_bytes(data)
+            saved.append(path)
+    return saved
 
 
 def get_message_history(
