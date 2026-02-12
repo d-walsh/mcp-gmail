@@ -148,6 +148,59 @@ pre-commit run --all-files
 
 ## Usage
 
+### Using as a Python library (no AI / no MCP)
+
+You can use the Gmail logic directly from Python (e.g. scripts, Codex workflows, cron jobs) without running the MCP server or any LLM. Same OAuth setup (`credentials.json`, `token.json`).
+
+```python
+from mcp_gmail.gmail import (
+    get_gmail_service,
+    send_email,
+    search_messages,
+    get_message,
+    get_headers_dict,
+    parse_message_body,
+)
+
+# Auth uses MCP_GMAIL_CREDENTIALS_PATH / MCP_GMAIL_TOKEN_PATH if set, else defaults
+service = get_gmail_service(
+    credentials_path="credentials.json",
+    token_path="token.json",
+)
+
+# Send an email (no MCP, no tokens)
+profile = service.users().getProfile(userId="me").execute()
+sender = profile.get("emailAddress")
+send_email(service, sender=sender, to="someone@example.com", subject="Hi", body="Hello")
+
+# Search and read messages
+messages, next_token = search_messages(service, from_email="alice@example.com", max_results=5)
+for msg_info in messages:
+    msg = get_message(service, msg_info["id"])
+    headers = get_headers_dict(msg)
+    body = parse_message_body(msg)
+    print(headers.get("Subject"), body[:200])
+```
+
+All operations in `mcp_gmail.gmail` (e.g. `create_draft`, `send_reply`, `query_emails` via `list_messages`, `modify_message_labels`, `get_labels`) are available this way. Use this for token-heavy or fully automated workflows without an AI in the middle.
+
+**CLI (same credentials, no MCP):** After `uv sync`, you can run Gmail from the shell so scripted or Codex workflows don’t need an AI in the loop:
+
+```bash
+# Search (Gmail query syntax)
+uv run mcp-gmail search --query "from:alice@example.com" --max 5 --show-next-token
+
+# Send
+uv run mcp-gmail send --to "bob@example.com" --subject "Hi" --body "Hello"
+
+# Get one message
+uv run mcp-gmail get MESSAGE_ID
+```
+
+Set `MCP_GMAIL_CREDENTIALS_PATH` and `MCP_GMAIL_TOKEN_PATH` (or rely on defaults) so the CLI uses the same OAuth setup as the MCP server.
+
+### Using via MCP (with Claude Desktop or other MCP clients)
+
 Once running, you can connect to the MCP server using any MCP client or via Claude Desktop.
 
 ### Available Resources
