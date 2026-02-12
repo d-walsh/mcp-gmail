@@ -167,6 +167,21 @@ Once running, you can connect to the MCP server using any MCP client or via Clau
 - `add_label_to_message` - Add a label to a message
 - `remove_label_from_message` - Remove a label from a message
 
+### Pagination
+
+When listing or searching emails, the Gmail API returns at most `max_results` per request and may have more results. The MCP supports pagination so an agent can page through all matches:
+
+- **`search_emails`** and **`query_emails`** accept an optional **`page_token`** (omit it for the first page).
+- The tool response includes a **`next_page_token`** line when more results are available. To get the next page, call the same tool again with `page_token` set to that value (and the same other arguments).
+- If there is no `next_page_token` in the response, there are no more pages.
+
+Example flow for an agent:
+1. Call `search_emails(...)` or `query_emails(...)` with no `page_token`.
+2. If the response contains `next_page_token: <token>`, call again with `page_token=<token>` to get the next page.
+3. Repeat until the response has no `next_page_token`.
+
+You can also raise `max_results` (or set `MCP_GMAIL_MAX_RESULTS`) to get more results per page (Gmail API allows up to 500).
+
 ## Environment Variables
 
 You can configure the server using environment variables:

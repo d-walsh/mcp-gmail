@@ -301,6 +301,7 @@ def search_emails(
     before_date: Optional[str] = None,
     label: Optional[str] = None,
     max_results: int = 10,
+    page_token: Optional[str] = None,
 ) -> str:
     """
     Search for emails using specific search criteria.
@@ -315,9 +316,10 @@ def search_emails(
         before_date: Filter for emails before this date (format: YYYY/MM/DD)
         label: Filter by Gmail label
         max_results: Maximum number of results to return
+        page_token: Token for the next page (omit for first page; use next_page_token from previous response)
 
     Returns:
-        Formatted list of matching emails
+        Formatted list of matching emails. Includes next_page_token when more results are available.
     """
     # Validate date formats
     if after_date and not validate_date_format(after_date):
@@ -327,7 +329,7 @@ def search_emails(
         return f"Error: before_date '{before_date}' is not in the required format YYYY/MM/DD"
 
     # Use search_messages to find matching emails
-    messages = search_messages(
+    messages, next_page_token = search_messages(
         get_service(),
         user_id=settings.user_id,
         from_email=from_email,
@@ -339,9 +341,12 @@ def search_emails(
         before=before_date,
         labels=[label] if label else None,
         max_results=max_results,
+        page_token=page_token,
     )
 
     result = f"Found {len(messages)} messages matching criteria:\n"
+    if next_page_token:
+        result += f"next_page_token: {next_page_token}\n"
 
     for msg_info in messages:
         msg_id = msg_info.get("id")
@@ -361,20 +366,31 @@ def search_emails(
 
 
 @mcp.tool()
-def query_emails(query: str, max_results: int = 10) -> str:
+def query_emails(
+    query: str, max_results: int = 10, page_token: Optional[str] = None
+) -> str:
     """
     Search for emails using a raw Gmail query string.
 
     Args:
         query: Gmail search query (same syntax as Gmail search box)
         max_results: Maximum number of results to return
+        page_token: Token for the next page (omit for first page; use next_page_token from previous response)
 
     Returns:
-        Formatted list of matching emails
+        Formatted list of matching emails. Includes next_page_token when more results are available.
     """
-    messages = list_messages(get_service(), user_id=settings.user_id, max_results=max_results, query=query)
+    messages, next_page_token = list_messages(
+        get_service(),
+        user_id=settings.user_id,
+        max_results=max_results,
+        query=query,
+        page_token=page_token,
+    )
 
     result = f'Found {len(messages)} messages matching query: "{query}"\n'
+    if next_page_token:
+        result += f"next_page_token: {next_page_token}\n"
 
     for msg_info in messages:
         msg_id = msg_info.get("id")

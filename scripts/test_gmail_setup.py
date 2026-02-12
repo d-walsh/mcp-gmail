@@ -17,7 +17,7 @@ def test_gmail_connection():
 
     # Attempt to get a few recent messages as additional verification
     print("\nChecking for recent messages...")
-    messages = gmail.list_messages(service, max_results=3)
+    messages, _ = gmail.list_messages(service, max_results=3)
     if messages:
         print(f"Found {len(messages)} recent messages!")
         print("\n✅ SUCCESS: Your Gmail API setup is working correctly!")

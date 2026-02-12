@@ -7,7 +7,7 @@ import json
 import os
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -422,7 +422,8 @@ def list_messages(
     user_id: str = DEFAULT_USER_ID,
     max_results: int = 10,
     query: Optional[str] = None,
-) -> List[Dict[str, Any]]:
+    page_token: Optional[str] = None,
+) -> Tuple[List[Dict[str, Any]], Optional[str]]:
     """
     List messages in the user's mailbox.
 
@@ -431,21 +432,29 @@ def list_messages(
         user_id: Gmail user ID (default: 'me')
         max_results: Maximum number of messages to return (default: 10)
         query: Search query (default: None)
+        page_token: Token for the next page of results (from a previous response)
 
     Returns:
-        List of message objects
+        Tuple of (list of message objects, next_page_token or None)
     """
-    response = (
-        service.users().messages().list(userId=user_id, maxResults=max_results, q=query or "").execute()
-    )
+    request_params: Dict[str, Any] = {
+        "userId": user_id,
+        "maxResults": max_results,
+        "q": query or "",
+    }
+    if page_token:
+        request_params["pageToken"] = page_token
+    response = service.users().messages().list(**request_params).execute()
     messages = response.get("messages", [])
-    return messages
+    next_page_token = response.get("nextPageToken")
+    return messages, next_page_token
 
 
 def search_messages(
     service: GmailService,
     user_id: str = DEFAULT_USER_ID,
     max_results: int = 10,
+    page_token: Optional[str] = None,
     is_unread: Optional[bool] = None,
     labels: Optional[List[str]] = None,
     from_email: Optional[str] = None,
@@ -457,7 +466,7 @@ def search_messages(
     is_starred: Optional[bool] = None,
     is_important: Optional[bool] = None,
     in_trash: Optional[bool] = None,
-) -> List[Dict[str, Any]]:
+) -> Tuple[List[Dict[str, Any]], Optional[str]]:
     """
     Search for messages in the user's mailbox using various criteria.
 
@@ -465,6 +474,7 @@ def search_messages(
         service: Gmail API service instance
         user_id: Gmail user ID (default: 'me')
         max_results: Maximum number of messages to return (default: 10)
+        page_token: Token for the next page (from a previous response)
         is_unread: If True, only return unread messages (optional)
         labels: List of label names to search for (optional)
         from_email: Sender email address (optional)
@@ -478,7 +488,7 @@ def search_messages(
         in_trash: If True, only search in trash (optional)
 
     Returns:
-        List of message objects matching the search criteria
+        Tuple of (list of message objects, next_page_token or None)
     """
     query_parts = []
 
@@ -525,7 +535,9 @@ def search_messages(
     query = " ".join(query_parts)
 
     # Use the existing list_messages function to perform the search
-    return list_messages(service, user_id, max_results, query)
+    return list_messages(
+        service, user_id, max_results, query, page_token=page_token
+    )
 
 
 def get_message(service: GmailService, message_id: str, user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]:
